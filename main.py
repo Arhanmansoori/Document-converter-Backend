@@ -1,17 +1,16 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, BackgroundTasks
-
+from fastapi import (FastAPI, UploadFile, File, Depends, HTTPException, BackgroundTasks, Form, )
 from fastapi import Query
 from sqlalchemy.orm import Session
 from fastapi.responses import JSONResponse
 from database import Base, engine, SessionLocal
-from schemas import ConversionResponse
+from schemas import ConversionResponse, PdfSummaryResponse
 from crud import save_conversion, get_latest_conversion
 from utils import (
     save_uploaded_file, convert_word_to_pdf, convert_html_to_pdf, 
     convert_pdf_to_image_pdf, convert_excel_to_pdf, merge_pdfs,
     compress_pdf, convert_pdf_to_word, convert_pdf_to_image, 
     convert_image_to_pdf, split_pdf, rotate_pdf, protect_pdf, 
-    extract_text_from_pdf, add_watermark_to_pdf,summarize_pdf
+    extract_text_from_pdf, add_watermark_to_pdf,summarize_pdf,translate_pdf
 )
 import os
 from fastapi.responses import FileResponse
@@ -252,6 +251,7 @@ def root():
             "compress_pdf": "/compress-pdf",
             "protect_pdf": "/protect-pdf",
             "watermark_pdf": "/watermark-pdf",
+            "summarize_pdf": "/summarize-pdf",
             "latest_conversion": "/conversion/latest",
             "docs": "/docs"
         }
@@ -627,7 +627,7 @@ async def watermark_pdf_api(
 
 
 
-@app.post("/summarize-pdf")
+@app.post("/summarize-pdf", response_model=PdfSummaryResponse)
 async def summarize_pdf_api(
     *,
     file: UploadFile = File(...),
@@ -659,3 +659,116 @@ async def summarize_pdf_api(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/translate-pdf")
+async def translate_pdf_api(
+    *,
+    file: UploadFile = File(...),
+    source_language: str = Form(...),
+    target_language: str = Form(...),
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Translate a PDF from one language to another using Groq AI.
+
+    Input:
+        - PDF file
+        - source_language
+        - target_language
+
+    Output:
+        - translated PDF
+    """
+
+    # Validate file
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="No file provided."
+        )
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are allowed."
+        )
+
+    if not source_language.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Source language is required."
+        )
+
+    if not target_language.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Target language is required."
+        )
+
+    if (
+        source_language.strip().lower()
+        == target_language.strip().lower()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Source and target languages "
+                "must be different."
+            )
+        )
+
+    try:
+
+        # Save original PDF
+        original_path = save_uploaded_file(file)
+
+        # Translate PDF
+        translated_path = translate_pdf(
+            pdf_path=original_path,
+            source_language=source_language,
+            target_language=target_language,
+        )
+
+        # Save conversion record
+        save_conversion(
+            db,
+            original_filename=file.filename,
+            original_path=original_path,
+            converted_path=translated_path,
+            conversion_type=(
+                f"translate-pdf-"
+                f"{source_language}-"
+                f"to-"
+                f"{target_language}"
+            ),
+        )
+
+        # Cleanup after response
+        _schedule_file_cleanup(
+            background_tasks,
+            original_path,
+            translated_path,
+        )
+
+        return FileResponse(
+            path=translated_path,
+            media_type="application/pdf",
+            filename=os.path.basename(
+                translated_path
+            ),
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        import traceback
+
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF translation failed: {str(e)}",
+        )

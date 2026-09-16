@@ -12,3 +12,8 @@ class ConversionResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PdfSummaryResponse(BaseModel):
+    filename: str
+    summary: str

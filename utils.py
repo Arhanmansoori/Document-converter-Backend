@@ -1,19 +1,12 @@
 # AI assisted development
 import os
-import uuid
 import subprocess
+import uuid
+
 from pdf2image import convert_from_path
 from PIL import Image
-from pypdf import PdfMerger
-from pypdf import PdfMerger
-from pypdf import PdfReader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import PromptTemplate
-import google.generativeai as genai
-import os
-import requests
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
+import re
 
 
 UPLOAD_DIR = "static/uploads"
@@ -205,10 +198,6 @@ def convert_excel_to_pdf(excel_path: str) -> str:
     return output_pdf_path.replace("\\", "/")
 
 
-from pypdf import PdfReader, PdfWriter
-import os
-import uuid
-
 def merge_pdfs(pdf_paths: list) -> str:
     OUTPUT_DIR = "static/converted"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -228,10 +217,6 @@ def merge_pdfs(pdf_paths: list) -> str:
 
     return merged_path.replace("\\", "/")
 
-
-import subprocess
-import os
-import uuid
 
 def compress_pdf(pdf_path: str, level: str = "extreme") -> str:
     OUTPUT_DIR = "static/converted"
@@ -496,13 +481,27 @@ def add_watermark_to_pdf(pdf_path: str, watermark_text: str) -> str:
 
 
 #----------------- AI SUMMARIZER ---------------------------------#
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/"
     "models/gemini-2.5-flash:generateContent"
 )
 
+
+def _extract_gemini_text(data: dict) -> str:
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception:
+        raise Exception(f"Gemini API error: {data}")
+
+
 def summarize_pdf(pdf_path: str) -> str:
+    import requests
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key:
+        raise Exception("GEMINI_API_KEY is not configured")
+
     reader = PdfReader(pdf_path)
     text = ""
 
@@ -522,7 +521,7 @@ def summarize_pdf(pdf_path: str) -> str:
 
     headers = {
         "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
+        "x-goog-api-key": gemini_api_key
     }
 
     for chunk in chunks:
@@ -554,17 +553,10 @@ SUMMARY:
             json=payload,
             timeout=60
         )
+        response.raise_for_status()
 
         data = response.json()
-
-        try:
-            chunk_summary = (
-                data["candidates"][0]
-                ["content"]["parts"][0]["text"]
-            )
-            summaries.append(chunk_summary)
-        except Exception:
-            raise Exception(f"Gemini API error: {data}")
+        summaries.append(_extract_gemini_text(data))
 
     final_prompt = f"""
 Combine the following summaries into ONE final summary
@@ -591,14 +583,407 @@ FINAL SUMMARY:
         json=payload,
         timeout=60
     )
+    final_response.raise_for_status()
 
     final_data = final_response.json()
+    return _extract_gemini_text(final_data)
 
-    try:
-        return (
-            final_data["candidates"][0]
-            ["content"]["parts"][0]["text"]
-            .strip()
+
+
+# ----------------- AI PDF TRANSLATOR -----------------
+
+from groq import Groq
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_LEFT
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase import pdfmetrics
+
+
+SUPPORTED_LANGUAGES = {
+    "english": "English",
+    "hindi": "Hindi",
+    "spanish": "Spanish",
+    "french": "French",
+    "german": "German",
+    "italian": "Italian",
+    "portuguese": "Portuguese",
+    "russian": "Russian",
+    "japanese": "Japanese",
+    "korean": "Korean",
+    "chinese": "Chinese",
+    "arabic": "Arabic",
+    "bengali": "Bengali",
+    "marathi": "Marathi",
+    "tamil": "Tamil",
+    "telugu": "Telugu",
+    "gujarati": "Gujarati",
+    "punjabi": "Punjabi",
+    "urdu": "Urdu",
+}
+
+
+def _get_groq_client():
+    """
+    Create and return Groq client using GROQ_API_KEY.
+    """
+    groq_api_key = os.getenv("GROQ_API_KEY")
+
+    if not groq_api_key:
+        raise Exception("GROQ_API_KEY is not configured")
+
+    return Groq(api_key=groq_api_key)
+
+
+def _extract_pdf_text(pdf_path: str) -> list[str]:
+    """
+    Extract text page-by-page from a PDF.
+
+    Returns:
+        List of page text strings.
+    """
+    reader = PdfReader(pdf_path)
+
+    pages = []
+
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        pages.append(text.strip())
+
+    return pages
+
+
+def _split_text_for_translation(
+    text: str,
+    max_chars: int = 10000
+) -> list[str]:
+    """
+    Split text into chunks without unnecessarily breaking paragraphs.
+    """
+
+    if not text.strip():
+        return []
+
+    paragraphs = text.split("\n")
+
+    chunks = []
+    current_chunk = ""
+
+    for paragraph in paragraphs:
+
+        paragraph = paragraph.strip()
+
+        if not paragraph:
+            continue
+
+        # If adding this paragraph exceeds the limit,
+        # save the current chunk.
+        if (
+            current_chunk
+            and len(current_chunk) + len(paragraph) + 1 > max_chars
+        ):
+            chunks.append(current_chunk.strip())
+            current_chunk = ""
+
+        current_chunk += paragraph + "\n"
+
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+
+def _translate_text_with_groq(
+    text: str,
+    source_language: str,
+    target_language: str,
+) -> str:
+
+    client = _get_groq_client()
+
+    model = os.getenv(
+        "GROQ_TRANSLATION_MODEL",
+        "llama-3.3-70b-versatile"
+    )
+
+    prompt = f"""
+Translate the following document content from {source_language}
+to {target_language}.
+
+IMPORTANT RULES:
+
+1. Translate accurately and naturally.
+2. Preserve the original meaning.
+3. Do not summarize.
+4. Do not add explanations.
+5. Do not add comments before or after the translation.
+6. Preserve paragraph structure as much as possible.
+7. Preserve numbers, dates, names, URLs and identifiers.
+8. Preserve headings and list structure.
+9. Do not translate proper names unless they normally have a translated form.
+10. Return ONLY the translated document content.
+
+SOURCE LANGUAGE:
+{source_language}
+
+TARGET LANGUAGE:
+{target_language}
+
+DOCUMENT CONTENT:
+{text}
+"""
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a professional document translator. "
+                    "Your job is to translate documents accurately "
+                    "while preserving structure and meaning."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        temperature=0.1,
+        max_completion_tokens=12000,
+    )
+
+    translated_text = completion.choices[0].message.content
+
+    if not translated_text:
+        raise Exception("Groq returned an empty translation")
+
+    return translated_text.strip()
+
+
+def _register_unicode_font():
+    """
+    Try to register a Unicode font for multilingual PDF output.
+
+    Returns the font name to use.
+    """
+
+    possible_fonts = [
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\segoeui.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+
+    for font_path in possible_fonts:
+
+        if os.path.exists(font_path):
+
+            try:
+                font_name = "OneClickDocUnicode"
+
+                pdfmetrics.registerFont(
+                    TTFont(font_name, font_path)
+                )
+
+                return font_name
+
+            except Exception:
+                continue
+
+    return "Helvetica"
+
+
+def _create_translated_pdf(
+    translated_pages: list[str],
+    output_path: str,
+):
+    """
+    Generate a new PDF containing translated text.
+    """
+
+    font_name = _register_unicode_font()
+
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        rightMargin=45,
+        leftMargin=45,
+        topMargin=45,
+        bottomMargin=45,
+        title="Translated Document",
+    )
+
+    styles = getSampleStyleSheet()
+
+    body_style = ParagraphStyle(
+        "TranslatedBody",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=10,
+        leading=15,
+        alignment=TA_LEFT,
+        spaceAfter=8,
+    )
+
+    heading_style = ParagraphStyle(
+        "TranslatedHeading",
+        parent=styles["Heading2"],
+        fontName=font_name,
+        fontSize=14,
+        leading=18,
+        spaceAfter=12,
+    )
+
+    story = []
+
+    for page_index, page_text in enumerate(translated_pages):
+
+        if not page_text.strip():
+            continue
+
+        paragraphs = page_text.split("\n")
+
+        for paragraph in paragraphs:
+
+            paragraph = paragraph.strip()
+
+            if not paragraph:
+                story.append(Spacer(1, 6))
+                continue
+
+            # Escape ReportLab-sensitive characters
+            paragraph = (
+                paragraph
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+
+            # Simple heading detection
+            if len(paragraph) < 100 and (
+                paragraph.isupper()
+                or paragraph.endswith(":")
+            ):
+                story.append(
+                    Paragraph(paragraph, heading_style)
+                )
+            else:
+                story.append(
+                    Paragraph(paragraph, body_style)
+                )
+
+        # Preserve page separation
+        if page_index < len(translated_pages) - 1:
+            story.append(PageBreak())
+
+    doc.build(story)
+
+
+def translate_pdf(
+    pdf_path: str,
+    source_language: str,
+    target_language: str,
+) -> str:
+    """
+    Translate a PDF and create a translated PDF.
+
+    Args:
+        pdf_path:
+            Input PDF path.
+
+        source_language:
+            Language of the input document.
+
+        target_language:
+            Desired output language.
+
+    Returns:
+        Path to translated PDF.
+    """
+
+    source_language = source_language.strip().lower()
+    target_language = target_language.strip().lower()
+
+    if source_language not in SUPPORTED_LANGUAGES:
+        raise Exception(
+            f"Unsupported source language: {source_language}"
         )
-    except Exception:
-        raise Exception(f"Final Gemini error: {final_data}")
+
+    if target_language not in SUPPORTED_LANGUAGES:
+        raise Exception(
+            f"Unsupported target language: {target_language}"
+        )
+
+    if source_language == target_language:
+        raise Exception(
+            "Source and target languages must be different."
+        )
+
+    source_language_name = SUPPORTED_LANGUAGES[source_language]
+    target_language_name = SUPPORTED_LANGUAGES[target_language]
+
+    pages = _extract_pdf_text(pdf_path)
+
+    if not pages:
+        raise Exception("No pages found in PDF.")
+
+    translated_pages = []
+
+    for page_number, page_text in enumerate(pages, start=1):
+
+        if not page_text.strip():
+            translated_pages.append("")
+            continue
+
+        chunks = _split_text_for_translation(
+            page_text,
+            max_chars=10000
+        )
+
+        translated_chunks = []
+
+        for chunk in chunks:
+
+            translated_chunk = _translate_text_with_groq(
+                text=chunk,
+                source_language=source_language_name,
+                target_language=target_language_name,
+            )
+
+            translated_chunks.append(
+                translated_chunk
+            )
+
+        translated_page = "\n\n".join(
+            translated_chunks
+        )
+
+        translated_pages.append(
+            translated_page
+        )
+
+    OUTPUT_DIR = "static/converted"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    filename_base = os.path.splitext(
+        os.path.basename(pdf_path)
+    )[0]
+
+    output_pdf = os.path.join(
+        OUTPUT_DIR,
+        f"{filename_base}_{target_language}_translated.pdf"
+    )
+
+    _create_translated_pdf(
+        translated_pages=translated_pages,
+        output_path=output_pdf,
+    )
+
+    if not os.path.exists(output_pdf):
+        raise Exception(
+            "Translated PDF was not created."
+        )
+
+    return output_pdf.replace("\\", "/")
