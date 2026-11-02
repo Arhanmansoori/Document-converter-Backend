@@ -704,7 +704,7 @@ def _translate_text_with_groq(
 
     model = os.getenv(
         "GROQ_TRANSLATION_MODEL",
-        "llama-3.3-70b-versatile"
+        "openai/gpt-oss-120b"
     )
 
     prompt = f"""
@@ -714,15 +714,12 @@ to {target_language}.
 IMPORTANT RULES:
 
 1. Translate accurately and naturally.
-2. Preserve the original meaning.
-3. Do not summarize.
-4. Do not add explanations.
-5. Do not add comments before or after the translation.
-6. Preserve paragraph structure as much as possible.
-7. Preserve numbers, dates, names, URLs and identifiers.
-8. Preserve headings and list structure.
-9. Do not translate proper names unless they normally have a translated form.
-10. Return ONLY the translated document content.
+2. Do not summarize.
+3. Do not add explanations.
+4. Return ONLY the translated document content.
+5. Preserve paragraph structure.
+6. Preserve numbers, dates, names, URLs and identifiers.
+7. Preserve headings and list structure.
 
 SOURCE LANGUAGE:
 {source_language}
@@ -741,8 +738,8 @@ DOCUMENT CONTENT:
                 "role": "system",
                 "content": (
                     "You are a professional document translator. "
-                    "Your job is to translate documents accurately "
-                    "while preserving structure and meaning."
+                    "Translate accurately while preserving "
+                    "the meaning and structure of the source."
                 ),
             },
             {
@@ -760,7 +757,6 @@ DOCUMENT CONTENT:
         raise Exception("Groq returned an empty translation")
 
     return translated_text.strip()
-
 
 def _register_unicode_font():
     """
