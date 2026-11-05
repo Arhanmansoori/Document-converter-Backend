@@ -10,7 +10,7 @@ from utils import (
     convert_pdf_to_image_pdf, convert_excel_to_pdf, merge_pdfs,
     compress_pdf, convert_pdf_to_word, convert_pdf_to_image, 
     convert_image_to_pdf, split_pdf, rotate_pdf, protect_pdf, 
-    extract_text_from_pdf, add_watermark_to_pdf,summarize_pdf,translate_pdf
+    extract_text_from_pdf, add_watermark_to_pdf,summarize_pdf,translate_pdf,convert_pdf_to_powerpoint
 )
 import os
 from fastapi.responses import FileResponse
@@ -131,6 +131,78 @@ def download_conversion(
         media_type="application/octet-stream",
         filename=os.path.basename(file_path),
     )
+
+
+
+
+@app.post("/convert/pdf-to-powerpoint")
+async def convert_pdf_to_powerpoint_api(
+    *,
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    # Validate uploaded file
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="No file provided."
+        )
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are allowed."
+        )
+
+    try:
+        # Step 1: Save uploaded PDF
+        original_path = save_uploaded_file(file)
+
+        # Step 2: Convert PDF to PowerPoint
+        converted_path = convert_pdf_to_powerpoint(
+            original_path
+        )
+
+        # Step 3: Save conversion history
+        save_conversion(
+            db,
+            original_filename=file.filename,
+            original_path=original_path,
+            converted_path=converted_path,
+            conversion_type="pdf-to-powerpoint"
+        )
+
+        # Step 4: Schedule temporary-file cleanup
+        _schedule_file_cleanup(
+            background_tasks,
+            original_path,
+            converted_path
+        )
+
+        # Step 5: Return downloadable PPTX
+        return FileResponse(
+            path=converted_path,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "presentationml.presentation"
+            ),
+            filename=os.path.basename(converted_path)
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF to PowerPoint conversion failed: {str(e)}"
+        )
+
+
 
 @app.post("/convert/html-to-pdf", response_model=ConversionResponse)
 async def convert_html_to_pdf_api(

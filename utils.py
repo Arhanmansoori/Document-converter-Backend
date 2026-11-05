@@ -95,6 +95,119 @@ def convert_word_to_pdf(word_path):
 
     return expected_pdf_path.replace("\\", "/")
 
+
+
+# PDF to PowerPoint Conversion
+def convert_pdf_to_powerpoint(pdf_path: str) -> str:
+    """
+    Convert PDF pages into PowerPoint slides.
+
+    Each PDF page becomes one high-resolution image
+    on a separate PowerPoint slide.
+
+    Returns:
+        Path to generated PPTX file.
+    """
+
+    import os
+    from io import BytesIO
+
+    from pdf2image import convert_from_path
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    OUTPUT_DIR = "static/converted"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # Generate output filename
+    filename_base = os.path.splitext(
+        os.path.basename(pdf_path)
+    )[0]
+
+    output_pptx = os.path.join(
+        OUTPUT_DIR,
+        f"{filename_base}_{uuid.uuid4().hex[:8]}.pptx"
+    )
+
+    # Render PDF pages as images
+    POPPLER_PATH = r"C:\Program Files (x86)\poppler-26.09.0\Library\bin"
+
+    images = convert_from_path(
+        pdf_path,
+        dpi=150,
+        fmt="png",
+        poppler_path=POPPLER_PATH
+    )
+
+    if not images:
+        raise Exception("No pages found in the PDF.")
+
+    # Create PowerPoint presentation
+    presentation = Presentation()
+
+    # Use the first PDF page's aspect ratio
+    first_width, first_height = images[0].size
+
+    slide_width = Inches(13.333)
+    slide_height = Inches(
+        13.333 * first_height / first_width
+    )
+
+    presentation.slide_width = slide_width
+    presentation.slide_height = slide_height
+
+    blank_layout = presentation.slide_layouts[6]
+
+    for page_image in images:
+
+        slide = presentation.slides.add_slide(
+            blank_layout
+        )
+
+        image_width, image_height = page_image.size
+
+        # Fit image inside the slide without distortion
+        scale = min(
+            slide_width / image_width,
+            slide_height / image_height
+        )
+
+        picture_width = int(image_width * scale)
+        picture_height = int(image_height * scale)
+
+        left = int((slide_width - picture_width) / 2)
+        top = int((slide_height - picture_height) / 2)
+
+        # Convert PIL image into memory buffer
+        image_buffer = BytesIO()
+
+        page_image.save(
+            image_buffer,
+            format="PNG"
+        )
+
+        image_buffer.seek(0)
+
+        # Add PDF page as PowerPoint slide image
+        slide.shapes.add_picture(
+            image_buffer,
+            left,
+            top,
+            width=picture_width,
+            height=picture_height
+        )
+
+    # Save PowerPoint file
+    presentation.save(output_pptx)
+
+    if not os.path.exists(output_pptx):
+        raise Exception(
+            "PowerPoint file was not generated."
+        )
+
+    return output_pptx.replace("\\", "/")
+
+
 def convert_html_to_pdf(html_path):
     import subprocess
     import os
